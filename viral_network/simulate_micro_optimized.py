@@ -14,10 +14,8 @@ from functools import partial
 
 try:
     from viral_network.numba_kernels import (
-        sample_neighbors_numba,
-        compute_transmission_parallel,
-        update_states_numba,
-        check_target_reached_numba,
+        step_push_frontier,
+        compact_true_indices,
     )
     NUMBA_AVAILABLE = True
 except ImportError:
@@ -27,12 +25,9 @@ except ImportError:
 
 @dataclass
 class SimulationStateOptimized:
-    """Optimized simulation state using sets for O(1) lookups."""
+    """Compact state snapshot for optimized micro simulation."""
     t: int
-    S: set  # Susceptible (set for O(1) lookup)
-    I: set  # Infected
-    R: set  # Recovered
-    I_count: int  # Cache for performance
+    I_count: int
     R_count: int
 
 
@@ -71,10 +66,15 @@ class SimulatorMicroOptimized:
         self.n_workers = n_workers or mp.cpu_count()
         self.rng = np.random.RandomState(config.seed)
         
-        # Convert to COO for efficient neighbor access
-        self.adj_coo = adj.tocoo()
-        self.neighbors_dict = self._build_neighbor_dict()
-        
+        # Extract compact CSR arrays (int32) and drop adjacency to reduce RAM
+        self.indptr = adj.indptr.astype(np.int32, copy=True)
+        self.indices = adj.indices.astype(np.int32, copy=True)
+        # Allow GC to free CSR data if not otherwise referenced
+        try:
+            self.adj = None
+        except Exception:
+            pass
+
         logger.info(
             f"Initialized SimulatorMicroOptimized: N={self.N}, K={self.K}, "
             f"workers={self.n_workers}, numba={'enabled' if NUMBA_AVAILABLE else 'disabled'}"
@@ -94,73 +94,120 @@ class SimulatorMicroOptimized:
         initial_seeds: List[int],
         target_node: int,
     ) -> Tuple[List[SimulationStateOptimized], Dict]:
-        """Run optimized simulation.
-        
-        Args:
-            initial_seeds: Initial infected nodes
-            target_node: Target node to reach
-        
-        Returns:
-            Tuple of (states, metrics)
-        """
+        """Run optimized simulation using frontier + Numba kernels and compact memory."""
         logger.info(
             f"Starting optimized simulation: seeds={initial_seeds}, "
             f"target={target_node} (cluster {self.node_to_cluster[target_node]})"
         )
-        
-        # Initialize state with sets for O(1) lookups
-        S = set(range(self.N)) - set(initial_seeds)
-        I = set(initial_seeds)
-        R = set()
-        
-        states = []
+
+        N = self.N
+        fanout = int(self.config.fanout)
+        p_dropout = float(self.config.p_dropout)
+
+        # State as boolean masks for memory efficiency
+        infected = np.zeros(N, dtype=np.bool_)
+        recovered = np.zeros(N, dtype=np.bool_)
+        susceptible = np.ones(N, dtype=np.bool_)
+
+        # Initialize frontier
+        for s in initial_seeds:
+            infected[s] = True
+            susceptible[s] = False
+        frontier = np.array(initial_seeds, dtype=np.int64)
+
+        next_mask = np.zeros(N, dtype=np.bool_)
+
+        states: List[SimulationStateOptimized] = []
         target_reached = False
         target_reach_time = None
-        
+
         for t in range(self.config.max_steps):
             # Check if target reached
-            if target_node in I or target_node in R:
+            if infected[target_node] or recovered[target_node]:
                 if not target_reached:
                     target_reached = True
                     target_reach_time = t
                     logger.info(f"Target reached at t={t}")
-            
+
             # Stop if no more infected
-            if len(I) == 0:
+            if frontier.size == 0:
                 logger.info(f"Simulation ended at t={t}: no more infected nodes")
                 break
-            
-            # Store state
-            state = SimulationStateOptimized(
-                t=t,
-                S=S.copy(),
-                I=I.copy(),
-                R=R.copy(),
-                I_count=len(I),
-                R_count=len(R),
+
+            # Snapshot counts (compact)
+            states.append(
+                SimulationStateOptimized(
+                    t=t,
+                    I_count=int(infected.sum()),
+                    R_count=int(recovered.sum()),
+                )
             )
-            states.append(state)
-            
-            # Compute transmissions
-            new_infections = self._compute_transmissions_optimized(I, S)
-            
-            # Update state
-            S = S - new_infections
-            R = R | I
-            I = new_infections
-        
-        # Compute metrics
+
+            # Kernel: mark candidate next infections in next_mask
+            if NUMBA_AVAILABLE:
+                seed = (self.config.seed or 0) + t
+                step_push_frontier(self.indptr, self.indices, frontier, fanout, p_dropout, next_mask, seed & 0xFFFFFFFF)
+            else:
+                # Fallback (Python): similar semantics
+                for u in frontier:
+                    start, end = int(self.indptr[u]), int(self.indptr[u + 1])
+                    deg = end - start
+                    if deg <= 0:
+                        continue
+                    if np.random.random() < p_dropout:
+                        continue
+                    k = fanout if fanout < deg else deg
+                    chosen = set()
+                    for _ in range(k):
+                        tries = 0
+                        while True:
+                            v = self.indices[start + np.random.randint(0, deg)]
+                            if v not in chosen or tries > 8:
+                                chosen.add(int(v))
+                                break
+                            tries += 1
+                    for v in chosen:
+                        next_mask[v] = True
+
+            # Only susceptibles can become newly infected
+            newly_mask = np.logical_and(next_mask, susceptible)
+            next_mask[:] = False  # clear for next round
+
+            # Build next frontier and update masks
+            if NUMBA_AVAILABLE:
+                next_frontier = compact_true_indices(newly_mask)
+            else:
+                next_frontier = np.where(newly_mask)[0].astype(np.int64)
+
+            # Update S/I/R
+            recovered |= infected
+            infected[:] = False
+            infected[next_frontier] = True
+            susceptible[next_frontier] = False
+
+            frontier = next_frontier
+
+        # Final snapshot
+        states.append(
+            SimulationStateOptimized(
+                t=len(states),
+                I_count=int(infected.sum()),
+                R_count=int(recovered.sum()),
+            )
+        )
+
+        # Metrics
         metrics = {
             "target_reached": target_reached,
             "target_reach_time": target_reach_time,
-            "final_infected_count": len(R),
+            "final_infected_count": int((infected | recovered).sum()),
             "max_concurrent_I": max((s.I_count for s in states), default=0),
             "times": [s.t for s in states],
             "I_counts": [s.I_count for s in states],
             "R_counts": [s.R_count for s in states],
-            "cumulative_infected": [s.R_count for s in states],
+            "cumulative_infected": [int((i > 0) + r) for i, r in zip([s.I_count for s in states], [s.R_count for s in states])],
         }
-        
+
         logger.info(f"Simulation complete: target_reached={target_reached}")
         return states, metrics
     

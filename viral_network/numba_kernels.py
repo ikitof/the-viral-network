@@ -18,14 +18,14 @@ def sample_neighbors_numba(
     rng_state: np.ndarray,
 ) -> np.ndarray:
     """Sample k distinct neighbors without replacement (Numba-optimized).
-    
+
     Args:
         neighbors_list: Flattened neighbor list
         neighbor_counts: Count of neighbors per node
         node_id: Node to sample from
         k: Number of neighbors to sample
         rng_state: Random state for reproducibility
-    
+
     Returns:
         Array of sampled neighbor indices
     """
@@ -33,23 +33,23 @@ def sample_neighbors_numba(
     start_idx = 0
     for i in range(node_id):
         start_idx += neighbor_counts[i]
-    
+
     end_idx = start_idx + neighbor_counts[node_id]
     num_neighbors = end_idx - start_idx
-    
+
     if num_neighbors == 0:
         return np.array([], dtype=np.int64)
-    
+
     k = min(k, num_neighbors)
-    
+
     # Fisher-Yates shuffle for sampling
     neighbors = neighbors_list[start_idx:end_idx].copy()
-    
+
     for i in range(k):
         # Random index from i to end
         j = i + np.random.randint(0, num_neighbors - i)
         neighbors[i], neighbors[j] = neighbors[j], neighbors[i]
-    
+
     return neighbors[:k]
 
 
@@ -63,7 +63,7 @@ def compute_transmission_parallel(
     rng_seed: int,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Compute transmissions for all infected nodes in parallel.
-    
+
     Args:
         I_nodes: Array of infected node indices
         neighbors_list: Flattened neighbor list
@@ -71,45 +71,45 @@ def compute_transmission_parallel(
         fanout: Number of neighbors to contact
         p_dropout: Dropout probability
         rng_seed: Random seed
-    
+
     Returns:
         Tuple of (target_nodes, source_nodes)
     """
     np.random.seed(rng_seed)
-    
+
     targets = []
     sources = []
-    
+
     for idx in prange(len(I_nodes)):
         node_id = I_nodes[idx]
-        
+
         # Check dropout
         if np.random.random() < p_dropout:
             continue
-        
+
         # Sample neighbors
         start_idx = 0
         for i in range(node_id):
             start_idx += neighbor_counts[i]
-        
+
         end_idx = start_idx + neighbor_counts[node_id]
         num_neighbors = end_idx - start_idx
-        
+
         if num_neighbors == 0:
             continue
-        
+
         k = min(fanout, num_neighbors)
-        
+
         # Sample k neighbors
         neighbors = neighbors_list[start_idx:end_idx].copy()
         for i in range(k):
             j = i + np.random.randint(0, num_neighbors - i)
             neighbors[i], neighbors[j] = neighbors[j], neighbors[i]
-        
+
         for i in range(k):
             targets.append(neighbors[i])
             sources.append(node_id)
-    
+
     return np.array(targets, dtype=np.int64), np.array(sources, dtype=np.int64)
 
 
@@ -122,25 +122,25 @@ def update_states_numba(
     sources: np.ndarray,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Update SIR states based on transmissions (Numba-optimized).
-    
+
     Args:
         S: Susceptible set
         I: Infected set
         R: Recovered set
         targets: Target nodes for transmission
         sources: Source nodes for transmission
-    
+
     Returns:
         Updated (S, I, R) sets
     """
     new_S = S.copy()
     new_I = I.copy()
     new_R = R.copy()
-    
+
     # Mark all current I as R
     for node in I:
         new_R = np.append(new_R, node)
-    
+
     # Remove I from S and I
     new_S_list = []
     for node in S:
@@ -151,9 +151,9 @@ def update_states_numba(
                 break
         if not is_target:
             new_S_list.append(node)
-    
+
     new_S = np.array(new_S_list, dtype=np.int64)
-    
+
     # New I are targets that were in S
     new_I_list = []
     for target in targets:
@@ -164,9 +164,9 @@ def update_states_numba(
                 break
         if is_in_S:
             new_I_list.append(target)
-    
+
     new_I = np.array(new_I_list, dtype=np.int64)
-    
+
     return new_S, new_I, new_R
 
 
@@ -177,21 +177,21 @@ def count_neighbors_numba(
     n_nodes: int,
 ) -> np.ndarray:
     """Count neighbors for each node from COO format (Numba-optimized).
-    
+
     Args:
         row_indices: Row indices of edges
         col_indices: Column indices of edges
         n_nodes: Total number of nodes
-    
+
     Returns:
         Array of neighbor counts per node
     """
     counts = np.zeros(n_nodes, dtype=np.int64)
-    
+
     for i in range(len(row_indices)):
         row = row_indices[i]
         counts[row] += 1
-    
+
     return counts
 
 
@@ -203,29 +203,29 @@ def generate_sbm_edges_parallel(
     rng_seed: int,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Generate SBM edges in parallel (Numba-optimized).
-    
+
     Args:
         cluster_sizes: Size of each cluster
         p_intra: Intra-cluster connection probability
         p_inter: Inter-cluster connection probability
         rng_seed: Random seed
-    
+
     Returns:
         Tuple of (row_indices, col_indices)
     """
     np.random.seed(rng_seed)
-    
+
     n_nodes = np.sum(cluster_sizes)
     K = len(cluster_sizes)
-    
+
     # Compute cluster boundaries
     cluster_starts = np.zeros(K, dtype=np.int64)
     for i in range(1, K):
         cluster_starts[i] = cluster_starts[i-1] + cluster_sizes[i-1]
-    
+
     rows = []
     cols = []
-    
+
     # Generate edges within and between clusters
     for i in prange(n_nodes):
         # Find cluster of node i
@@ -234,7 +234,7 @@ def generate_sbm_edges_parallel(
             if i < cluster_starts[k] + cluster_sizes[k]:
                 cluster_i = k
                 break
-        
+
         for j in range(i + 1, n_nodes):
             # Find cluster of node j
             cluster_j = 0
@@ -242,20 +242,20 @@ def generate_sbm_edges_parallel(
                 if j < cluster_starts[k] + cluster_sizes[k]:
                     cluster_j = k
                     break
-            
+
             # Determine connection probability
             if cluster_i == cluster_j:
                 p = p_intra
             else:
                 p = p_inter
-            
+
             # Add edge with probability p
             if np.random.random() < p:
                 rows.append(i)
                 cols.append(j)
                 rows.append(j)
                 cols.append(i)
-    
+
     return np.array(rows, dtype=np.int64), np.array(cols, dtype=np.int64)
 
 
@@ -266,22 +266,83 @@ def check_target_reached_numba(
     target_node: int,
 ) -> bool:
     """Check if target node has been reached (Numba-optimized).
-    
+
     Args:
         I: Infected set
         R: Recovered set
         target_node: Target node to check
-    
+
     Returns:
         True if target is in I or R
     """
     for node in I:
         if node == target_node:
             return True
-    
+
     for node in R:
         if node == target_node:
             return True
-    
+
     return False
 
+
+
+
+@njit(parallel=True)
+def step_push_frontier(indptr, indices, frontier, fanout, p_dropout, next_mask, rng_seed):
+    """Numba kernel: for each node in frontier, attempt up to `fanout` contacts.
+    Marks next_mask[v] = True for contacted neighbors (no state checks here).
+    """
+    np.random.seed(rng_seed)
+    F = frontier.size
+    for t in prange(F):
+        u = frontier[t]
+        start = indptr[u]
+        end = indptr[u + 1]
+        deg = end - start
+        if deg <= 0:
+            continue
+        # Dropout at sender level: skip all attempts
+        if np.random.random() < p_dropout:
+            continue
+        # sample up to fanout distinct neighbors without replacement (small k)
+        k = fanout if fanout < deg else deg
+        # simple de-dup by small local buffer
+        picked0 = -1
+        picked1 = -1
+        picked2 = -1
+        for a in range(k):
+            tries = 0
+            while True:
+                j = start + np.random.randint(0, deg)
+                v = indices[j]
+                # avoid duplicates (fanout typically small)
+                if v != picked0 and v != picked1 and v != picked2:
+                    break
+                tries += 1
+                if tries > 8:
+                    break
+            if a == 0:
+                picked0 = v
+            elif a == 1:
+                picked1 = v
+            else:
+                picked2 = v
+            next_mask[v] = True
+
+
+@njit
+def compact_true_indices(mask):
+    """Return indices where mask is True (two-pass, numba-friendly)."""
+    n = mask.size
+    cnt = 0
+    for i in range(n):
+        if mask[i]:
+            cnt += 1
+    out = np.empty(cnt, dtype=np.int64)
+    w = 0
+    for i in range(n):
+        if mask[i]:
+            out[w] = i
+            w += 1
+    return out
