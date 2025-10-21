@@ -6,6 +6,10 @@ __pycache__/
 # C extensions
 *.so
 
+viral_env/
+BENCHMARKS.md
+INDEX.md
+runs/*
 # Distribution / packaging
 .Python
 build/

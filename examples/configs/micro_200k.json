@@ -1,0 +1,28 @@
+{
+  "seed": 42,
+  "mode": "micro",
+  "N": 200000,
+  "K": 50,
+  "cluster_sizes": "powerlaw",
+  "avg_degree": 100,
+  "fanout": 2,
+  "p_dropout": 0.15,
+  "max_steps": 64,
+  "mixing": {
+    "intra_strength": 0.95,
+    "inter_floor": 0.05
+  },
+  "friend_target": {
+    "select": "random_other_cluster",
+    "must_cross_clusters": true
+  },
+  "initial_seeds": {
+    "type": "single",
+    "cluster_policy": "home",
+    "count": 1,
+    "cluster_id": 0
+  },
+  "output_dir": "runs/micro_200k",
+  "runs": 1
+}
+

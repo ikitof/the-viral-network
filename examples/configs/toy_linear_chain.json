@@ -1,0 +1,28 @@
+{
+  "seed": 42,
+  "mode": "micro",
+  "N": 6,
+  "K": 2,
+  "cluster_sizes": "custom",
+  "avg_degree": 2,
+  "fanout": 1,
+  "p_dropout": 0.0,
+  "max_steps": 10,
+  "mixing": {
+    "intra_strength": 0.95,
+    "inter_floor": 0.05
+  },
+  "friend_target": {
+    "select": "random_other_cluster",
+    "must_cross_clusters": true
+  },
+  "initial_seeds": {
+    "type": "single",
+    "cluster_policy": "home",
+    "count": 1,
+    "cluster_id": 0
+  },
+  "output_dir": "runs/toy_linear_chain",
+  "runs": 1
+}
+
