@@ -167,3 +167,8 @@ def sample_neighbors(
         return neighbors
     return rng.choice(neighbors, size=k, replace=False)
 
+
+
+# Route baseline generator to fast O(E) implementation
+from .graph_generation_optimized import generate_sbm_graph_fast as _fast_sbm
+generate_sbm_graph = _fast_sbm  # backward-compatible name
