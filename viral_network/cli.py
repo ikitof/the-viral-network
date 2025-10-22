@@ -11,6 +11,7 @@ from loguru import logger
 from viral_network.config import Config
 from viral_network.graph_generation import generate_sbm_graph
 from viral_network.simulate_micro import SimulatorMicro
+from viral_network.simulate_micro_optimized import SimulatorMicroOptimized
 from viral_network.simulate_macro import SimulatorMacro
 from viral_network.targets import TargetSelector
 from viral_network.metrics import MetricsCollector
@@ -35,6 +36,9 @@ def run(
     runs: int = typer.Option(100, help="Number of runs (macro mode)"),
     seed: int = typer.Option(42, help="Random seed"),
     output_dir: str = typer.Option("runs/exp001", help="Output directory"),
+    micro_impl: str = typer.Option("optimized", help="Micro engine: 'optimized' or 'baseline'"),
+    cluster_sizes: str = typer.Option("uniform", help="Cluster size distribution: 'uniform' or 'powerlaw'"),
+    workers: Optional[int] = typer.Option(None, help="Workers for graph generation (default: CPU count)"),
 ) -> None:
     """Run a viral network simulation."""
     logger.info(f"Starting simulation: mode={mode}, N={N}, K={K}")
@@ -51,6 +55,7 @@ def run(
         runs=runs,
         seed=seed,
         output_dir=output_dir,
+        cluster_sizes=cluster_sizes,
     )
 
     # Create output directory
@@ -62,7 +67,7 @@ def run(
     logger.info(f"Saved config to {output_path / 'config.json'}")
 
     if mode == "micro":
-        _run_micro(config, output_path)
+        _run_micro(config, output_path, micro_impl, workers)
     elif mode == "macro":
         _run_macro(config, output_path)
     else:
@@ -70,9 +75,9 @@ def run(
         raise ValueError(f"Unknown mode: {mode}")
 
 
-def _run_micro(config: Config, output_path: Path) -> None:
-    """Run micro-scale simulation."""
-    logger.info("Running micro-scale simulation...")
+def _run_micro(config: Config, output_path: Path, micro_impl: str, workers: Optional[int]) -> None:
+    """Run micro-scale simulation (baseline or optimized)."""
+    logger.info(f"Running micro-scale simulation (impl={micro_impl})...")
 
     # Generate graph
     adj, node_to_cluster, metadata = generate_sbm_graph(
@@ -83,6 +88,7 @@ def _run_micro(config: Config, output_path: Path) -> None:
         intra_strength=config.mixing.intra_strength,
         inter_floor=config.mixing.inter_floor,
         seed=config.seed,
+        n_workers=workers,
     )
 
     # Save metadata
@@ -90,7 +96,12 @@ def _run_micro(config: Config, output_path: Path) -> None:
         json.dump(metadata, f, indent=2)
 
     # Create simulator
-    simulator = SimulatorMicro(adj, node_to_cluster, config)
+    if micro_impl.lower() in ("optimized", "fast"):
+        simulator = SimulatorMicroOptimized(adj, node_to_cluster, config)
+    elif micro_impl.lower() in ("baseline", "default"):
+        simulator = SimulatorMicro(adj, node_to_cluster, config)
+    else:
+        raise ValueError(f"Unknown micro_impl: {micro_impl}")
 
     # Select target
     target_selector = TargetSelector(config, node_to_cluster, simulator.rng)
@@ -114,7 +125,7 @@ def _run_micro(config: Config, output_path: Path) -> None:
         metrics["I_counts"],
         metrics["R_counts"],
         metrics["cumulative_infected"],
-        title="Micro-Scale Simulation",
+        title=f"Micro-Scale Simulation ({micro_impl})",
         output_path=output_path / "timeseries.png",
     )
 

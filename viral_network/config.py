@@ -11,13 +11,13 @@ class MixingConfig(BaseModel):
     """Configuration for inter/intra-cluster mixing probabilities."""
 
     intra_strength: float = Field(
-        default=0.98,
+        default=0.8,
         ge=0.0,
         le=1.0,
         description="Probability of intra-cluster connections",
     )
     inter_floor: float = Field(
-        default=0.02,
+        default=0.2,
         ge=0.0,
         le=1.0,
         description="Minimum inter-cluster connection probability",
