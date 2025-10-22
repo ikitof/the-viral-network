@@ -19,6 +19,8 @@ from viral_network.viz import (
     plot_timeseries,
     plot_inter_cluster_heatmap,
     plot_reach_time_distribution,
+    plot_cluster_dynamics,
+    plot_cluster_heatmap_over_time,
 )
 
 app = typer.Typer(help="Viral Network Simulation CLI")
@@ -127,7 +129,32 @@ def _run_micro(config: Config, output_path: Path, micro_impl: str, workers: Opti
         metrics["cumulative_infected"],
         title=f"Micro-Scale Simulation ({micro_impl})",
         output_path=output_path / "timeseries.png",
+        target_reach_time=metrics.get("target_reach_time"),
+        seed_cluster=metrics.get("seed_cluster"),
+        target_cluster=metrics.get("target_cluster"),
     )
+    # Cluster-level visuals
+    try:
+        I_by_cluster = np.array(metrics.get("I_by_cluster", []), dtype=np.int64)
+        if I_by_cluster.size > 0:
+            plot_cluster_dynamics(
+                metrics["times"],
+                I_by_cluster,
+                title=f"By-Cluster Dynamics ({micro_impl})",
+                output_path=output_path / "cluster_dynamics.html",
+                seed_cluster=metrics.get("seed_cluster"),
+                target_cluster=metrics.get("target_cluster"),
+                target_reach_time=metrics.get("target_reach_time"),
+                first_hit_times=metrics.get("first_hit_time_by_cluster"),
+            )
+            plot_cluster_heatmap_over_time(
+                metrics["times"],
+                I_by_cluster,
+                title=f"Cluster Heatmap Over Time ({micro_impl})",
+                output_path=output_path / "cluster_heatmap.html",
+            )
+    except Exception as e:
+        logger.warning(f"Cluster-level plotting failed: {e}")
 
 
 def _run_macro(config: Config, output_path: Path) -> None:

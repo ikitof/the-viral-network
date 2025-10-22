@@ -33,7 +33,7 @@ class SimulationStateOptimized:
 
 class SimulatorMicroOptimized:
     """Optimized micro-scale simulator for large N (up to 1B).
-    
+
     Optimizations:
     - Numba JIT compilation for hot loops
     - Sparse matrix representation
@@ -41,7 +41,7 @@ class SimulatorMicroOptimized:
     - Multiprocessing for graph generation
     - Vectorized operations where possible
     """
-    
+
     def __init__(
         self,
         adj: sparse.csr_matrix,
@@ -50,7 +50,7 @@ class SimulatorMicroOptimized:
         n_workers: Optional[int] = None,
     ):
         """Initialize optimized simulator.
-        
+
         Args:
             adj: Sparse adjacency matrix (CSR format)
             node_to_cluster: Cluster assignment per node
@@ -62,10 +62,10 @@ class SimulatorMicroOptimized:
         self.config = config
         self.N = adj.shape[0]
         self.K = len(np.unique(node_to_cluster))
-        
+
         self.n_workers = n_workers or mp.cpu_count()
         self.rng = np.random.RandomState(config.seed)
-        
+
         # Extract compact CSR arrays (int32) and drop adjacency to reduce RAM
         self.indptr = adj.indptr.astype(np.int32, copy=True)
         self.indices = adj.indices.astype(np.int32, copy=True)
@@ -79,7 +79,7 @@ class SimulatorMicroOptimized:
             f"Initialized SimulatorMicroOptimized: N={self.N}, K={self.K}, "
             f"workers={self.n_workers}, numba={'enabled' if NUMBA_AVAILABLE else 'disabled'}"
         )
-    
+
     def _build_neighbor_dict(self) -> Dict[int, np.ndarray]:
         """Build neighbor dictionary from sparse matrix."""
         neighbors = {}
@@ -88,7 +88,7 @@ class SimulatorMicroOptimized:
             row_end = self.adj.indptr[i + 1]
             neighbors[i] = self.adj.indices[row_start:row_end]
         return neighbors
-    
+
     def run(
         self,
         initial_seeds: List[int],
@@ -117,9 +117,24 @@ class SimulatorMicroOptimized:
 
         next_mask = np.zeros(N, dtype=np.bool_)
 
+        # Per-cluster tracking for visualization/diagnostics
+        K = self.K
+        cur_I_by_cluster = np.zeros(K, dtype=np.int64)
+        cur_R_by_cluster = np.zeros(K, dtype=np.int64)
+        seed_clusters = self.node_to_cluster[frontier]
+        if seed_clusters.size > 0:
+            cur_I_by_cluster += np.bincount(seed_clusters, minlength=K)
+        first_hit_time_by_cluster = np.full(K, -1, dtype=np.int64)
+        if seed_clusters.size > 0:
+            for c in np.unique(seed_clusters):
+                first_hit_time_by_cluster[int(c)] = 0
+        I_by_cluster_series: list = []
+        seed_cluster = int(self.node_to_cluster[frontier[0]]) if frontier.size > 0 else None
+        target_cluster = int(self.node_to_cluster[target_node])
         states: List[SimulationStateOptimized] = []
         target_reached = False
         target_reach_time = None
+
 
         for t in range(self.config.max_steps):
             # Check if target reached
@@ -135,6 +150,8 @@ class SimulatorMicroOptimized:
                 break
 
             # Snapshot counts (compact)
+            # Snapshot per-cluster infected before update (aligns with state at time t)
+            I_by_cluster_series.append(cur_I_by_cluster.copy())
             states.append(
                 SimulationStateOptimized(
                     t=t,
@@ -162,6 +179,7 @@ class SimulatorMicroOptimized:
                         tries = 0
                         while True:
                             v = self.indices[start + np.random.randint(0, deg)]
+
                             if v not in chosen or tries > 8:
                                 chosen.add(int(v))
                                 break
@@ -178,6 +196,20 @@ class SimulatorMicroOptimized:
                 next_frontier = compact_true_indices(newly_mask)
             else:
                 next_frontier = np.where(newly_mask)[0].astype(np.int64)
+            # Per-cluster updates for next step (based on next_frontier)
+            if next_frontier.size > 0:
+                next_counts = np.bincount(self.node_to_cluster[next_frontier], minlength=K)
+            else:
+                next_counts = np.zeros(K, dtype=np.int64)
+
+            # Record first-hit times for clusters newly infected at t+1
+            new_hit_mask = (first_hit_time_by_cluster < 0) & (next_counts > 0)
+            if np.any(new_hit_mask):
+                first_hit_time_by_cluster[new_hit_mask] = t + 1
+
+            # Move current infected to recovered, then set new infected
+            cur_R_by_cluster += cur_I_by_cluster
+            cur_I_by_cluster = next_counts
 
             # Update S/I/R
             recovered |= infected
@@ -196,56 +228,72 @@ class SimulatorMicroOptimized:
             )
         )
 
+        # Append final per-cluster infected snapshot to align with final state
+        I_by_cluster_series.append(cur_I_by_cluster.copy())
+
+        # Prepare arrays for metrics serialization
+        times = [s.t for s in states]
+        I_counts = [s.I_count for s in states]
+        R_counts = [s.R_count for s in states]
+        cumulative = [i + r for i, r in zip(I_counts, R_counts)]
+        I_by_cluster_arr = np.stack(I_by_cluster_series, axis=1) if I_by_cluster_series else np.zeros((K, 0), dtype=int)
+        first_hits_list = [None if int(v) < 0 else int(v) for v in first_hit_time_by_cluster.tolist()]
+
+
         # Metrics
         metrics = {
             "target_reached": target_reached,
             "target_reach_time": target_reach_time,
+            "seed_cluster": seed_cluster,
+            "target_cluster": target_cluster,
             "final_infected_count": int((infected | recovered).sum()),
-            "max_concurrent_I": max((s.I_count for s in states), default=0),
-            "times": [s.t for s in states],
-            "I_counts": [s.I_count for s in states],
-            "R_counts": [s.R_count for s in states],
-            "cumulative_infected": [int((i > 0) + r) for i, r in zip([s.I_count for s in states], [s.R_count for s in states])],
+            "max_concurrent_I": max(I_counts) if I_counts else 0,
+            "times": times,
+            "I_counts": I_counts,
+            "R_counts": R_counts,
+            "cumulative_infected": cumulative,
+            "I_by_cluster": I_by_cluster_arr.tolist(),
+            "first_hit_time_by_cluster": first_hits_list,
         }
 
         logger.info(f"Simulation complete: target_reached={target_reached}")
         return states, metrics
-    
+
     def _compute_transmissions_optimized(
         self,
         I: set,
         S: set,
     ) -> set:
         """Compute transmissions with optimization.
-        
+
         Args:
             I: Infected nodes
             S: Susceptible nodes
-        
+
         Returns:
             Set of newly infected nodes
         """
         new_infections = set()
-        
+
         for node in I:
             # Check dropout
             if self.rng.random() < self.config.p_dropout:
                 continue
-            
+
             # Get neighbors
             neighbors = self.neighbors_dict.get(node, np.array([]))
             if len(neighbors) == 0:
                 continue
-            
+
             # Sample fanout neighbors
             k = min(self.config.fanout, len(neighbors))
             sampled = self.rng.choice(neighbors, size=k, replace=False)
-            
+
             # Add susceptible neighbors to new infections
             for neighbor in sampled:
                 if neighbor in S:
                     new_infections.add(neighbor)
-        
+
         return new_infections
 
 
@@ -257,36 +305,36 @@ def run_parallel_simulations(
     n_workers: Optional[int] = None,
 ) -> List[Dict]:
     """Run multiple simulations in parallel.
-    
+
     Args:
         adj: Sparse adjacency matrix
         node_to_cluster: Cluster assignment
         config: Configuration
         num_runs: Number of simulations to run
         n_workers: Number of worker processes
-    
+
     Returns:
         List of metrics from each run
     """
     n_workers = n_workers or mp.cpu_count()
-    
+
     def run_single(run_id: int) -> Dict:
         """Run a single simulation."""
         simulator = SimulatorMicroOptimized(adj, node_to_cluster, config, n_workers=1)
-        
+
         # Select target and seeds
         initial_seeds = [run_id % node_to_cluster.shape[0]]
         target_cluster = (run_id + 1) % config.K
         target_nodes = np.where(node_to_cluster == target_cluster)[0]
         target_node = target_nodes[run_id % len(target_nodes)]
-        
+
         states, metrics = simulator.run(initial_seeds, target_node)
         return metrics
-    
+
     logger.info(f"Running {num_runs} simulations in parallel with {n_workers} workers")
-    
+
     with mp.Pool(n_workers) as pool:
         results = pool.map(run_single, range(num_runs))
-    
+
     return results
 
